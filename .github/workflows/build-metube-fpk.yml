@@ -1,0 +1,169 @@
+name: Build MeTube fnOS FPK
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "可选：指定 MeTube 标签，例如 2026.08.04；留空则自动检测最新 YYYY.MM.DD 标签"
+        required: false
+        type: string
+  schedule:
+    - cron: "47 2 * * *"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: 获取目标 MeTube 版本
+        id: version
+        env:
+          MANUAL_VERSION: ${{ inputs.version }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [ -n "${MANUAL_VERSION:-}" ]; then
+            TAG="${MANUAL_VERSION#v}"
+          else
+            TAG="$(python3 - <<'PY'
+          import json, os, re, urllib.request
+          token=os.environ.get('GH_TOKEN','').strip()
+          h={'Accept':'application/vnd.github+json','User-Agent':'MeTube-fnOS-builder','X-GitHub-Api-Version':'2022-11-28'}
+          if token: h['Authorization']=f'Bearer {token}'
+          req=urllib.request.Request('https://api.github.com/repos/alexta69/metube/tags?per_page=100',headers=h)
+          with urllib.request.urlopen(req,timeout=60) as r: tags=json.load(r)
+          pat=re.compile(r'^(\d{4})\.(\d{2})\.(\d{2})$')
+          found=[]
+          for item in tags:
+              name=str(item.get('name','')).strip(); m=pat.match(name)
+              if m: found.append((tuple(map(int,m.groups())),name))
+          if not found: raise SystemExit('没有找到 YYYY.MM.DD 格式的 MeTube 上游标签')
+          found.sort(reverse=True); print(found[0][1])
+          PY
+          )"
+          fi
+          PACK_REV="$(tr -d '[:space:]' < PACK_REV)"
+          RELEASE_TAG="fnos-${TAG}-${PACK_REV}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "pack_rev=$PACK_REV" >> "$GITHUB_OUTPUT"
+          echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          echo "上游版本: $TAG"
+          echo "fnOS 封装: $PACK_REV"
+
+      - name: 检查是否已经发布
+        id: existing
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.version.outputs.release_tag }}
+        run: |
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "$RELEASE_TAG 已存在，本次跳过。"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 验证上游标签存在
+        if: steps.existing.outputs.exists != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          gh api "repos/alexta69/metube/git/ref/tags/${TAG}" >/dev/null
+          echo "上游标签存在: ${TAG}"
+
+      - name: 一次性检查仓库文件完整性
+        if: steps.existing.outputs.exists != 'true'
+        run: |
+          set -euo pipefail
+          files=(
+            PACK_REV
+            scripts/build_fpk.sh
+            scripts/prepare_ffmpeg.py
+            package-template/manifest
+            package-template/ICON.PNG
+            package-template/ICON_256.PNG
+            package-template/LICENSE
+            package-template/config/privilege
+            package-template/config/resource
+            package-template/cmd/main
+            package-template/cmd/install_init
+            package-template/cmd/install_callback
+            package-template/cmd/upgrade_init
+            package-template/cmd/upgrade_callback
+            package-template/wizard/install
+            package-template/app/native/bootstrap.py
+            package-template/app/native/vendor/FFMPEG_GPL-3.0.txt
+            package-template/app/native/vendor/FFMPEG_NOTICE.txt
+            package-template/app/ui/config
+            package-template/app/ui/images/icon_64.png
+            package-template/app/ui/images/icon_256.png
+          )
+          missing=0
+          for f in "${files[@]}"; do
+            if [ ! -f "$f" ]; then
+              echo "::error::缺少 $f"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "::error::仓库文件不完整。请使用完整修复包覆盖仓库后再运行。"
+            exit 1
+          fi
+          echo "所有关键文件检查通过。"
+
+      - name: 准备 FPK 构建用 FFmpeg
+        if: steps.existing.outputs.exists != 'true'
+        run: |
+          python3 -m venv .ffmpeg-venv
+          .ffmpeg-venv/bin/python -m pip install --disable-pip-version-check "imageio-ffmpeg==0.6.0"
+          echo "FFMPEG_PYTHON=$GITHUB_WORKSPACE/.ffmpeg-venv/bin/python" >> "$GITHUB_ENV"
+
+      - name: 构建 x86 FPK（FFmpeg 必须内置）
+        if: steps.existing.outputs.exists != 'true'
+        run: |
+          chmod +x scripts/build_fpk.sh
+          scripts/build_fpk.sh "${{ steps.version.outputs.tag }}"
+
+      - name: 上传 Actions Artifact
+        if: steps.existing.outputs.exists != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: MeTube-${{ steps.version.outputs.tag }}-${{ steps.version.outputs.pack_rev }}-fnOS-x86
+          path: |
+            dist/*.fpk
+            dist/SHA256SUMS.txt
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: 创建 GitHub Pre-release
+        if: steps.existing.outputs.exists != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.version.outputs.release_tag }}
+          UPSTREAM_TAG: ${{ steps.version.outputs.tag }}
+          PACK_REV: ${{ steps.version.outputs.pack_rev }}
+        run: |
+          cat > /tmp/release-notes.md <<EOF
+          自动检测到 MeTube 上游 **${UPSTREAM_TAG}**，并生成 fnOS x86 原生 FPK。
+
+          - fnOS 封装：${PACK_REV}
+          - Web 端口：8081
+          - Docker：不使用
+          - FFmpeg：已直接打包进 FPK
+          - FFmpeg：7.0.2-static / Linux x86_64
+          - FFmpeg SHA256：e7e7fb30477f717e6f55f9180a70386c62677ef8a4d4d1a5d948f4098aa3eb99
+          - 下载目录：优先使用 fnOS 第一个可写授权目录；无授权目录时使用 metube/downloads
+
+          构建脚本会重新解开 app.tgz 校验 FFmpeg；缺失或 SHA256 不正确时不会发布。
+          EOF
+          gh release create "$RELEASE_TAG" \
+            dist/*.fpk dist/SHA256SUMS.txt \
+            --title "MeTube ${UPSTREAM_TAG} fnOS x86 (${PACK_REV})" \
+            --notes-file /tmp/release-notes.md \
+            --prerelease
