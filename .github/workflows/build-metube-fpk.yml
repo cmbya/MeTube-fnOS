@@ -1,0 +1,86 @@
+name: Build MeTube fnOS FPK
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "可选：指定 MeTube 标签，例如 2026.08.04；留空则自动检测最新 YYYY.MM.DD 标签"
+        required: false
+        type: string
+  schedule:
+    - cron: "47 2 * * *"
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: 获取目标 MeTube 版本
+        id: version
+        env:
+          MANUAL_VERSION: ${{ inputs.version }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [ -n "${MANUAL_VERSION:-}" ]; then TAG="${MANUAL_VERSION#v}"; else TAG="$(python3 scripts/latest_upstream.py)"; fi
+          PACK_REV="$(tr -d '[:space:]' < PACK_REV)"
+          RELEASE_TAG="fnos-${TAG}-${PACK_REV}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "pack_rev=$PACK_REV" >> "$GITHUB_OUTPUT"
+          echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+      - name: 检查是否已经发布
+        id: existing
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.version.outputs.release_tag }}
+        run: |
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then echo "exists=true" >> "$GITHUB_OUTPUT"; else echo "exists=false" >> "$GITHUB_OUTPUT"; fi
+      - name: 验证上游标签存在
+        if: steps.existing.outputs.exists != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: gh api "repos/alexta69/metube/git/ref/tags/${TAG}" >/dev/null
+      - name: 准备 FPK 构建用 FFmpeg
+        if: steps.existing.outputs.exists != 'true'
+        run: |
+          python3 -m venv .ffmpeg-venv
+          .ffmpeg-venv/bin/python -m pip install --disable-pip-version-check "imageio-ffmpeg==0.6.0"
+          echo "FFMPEG_PYTHON=$GITHUB_WORKSPACE/.ffmpeg-venv/bin/python" >> "$GITHUB_ENV"
+      - name: 构建 x86 FPK（FFmpeg 必须内置）
+        if: steps.existing.outputs.exists != 'true'
+        run: |
+          chmod +x scripts/build_fpk.sh
+          scripts/build_fpk.sh "${{ steps.version.outputs.tag }}"
+      - name: 上传 Actions Artifact
+        if: steps.existing.outputs.exists != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: MeTube-${{ steps.version.outputs.tag }}-${{ steps.version.outputs.pack_rev }}-fnOS-x86
+          path: |
+            dist/*.fpk
+            dist/SHA256SUMS.txt
+          retention-days: 30
+          if-no-files-found: error
+      - name: 创建 GitHub Pre-release
+        if: steps.existing.outputs.exists != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.version.outputs.release_tag }}
+          UPSTREAM_TAG: ${{ steps.version.outputs.tag }}
+          PACK_REV: ${{ steps.version.outputs.pack_rev }}
+        run: |
+          cat > /tmp/release-notes.md <<EOF
+          自动检测到 MeTube 上游 **${UPSTREAM_TAG}**，并生成 fnOS x86 原生 FPK。
+
+          - fnOS 封装：${PACK_REV}
+          - Web 端口：8081
+          - Docker：不使用
+          - FFmpeg：**已直接打包进 FPK**
+          - FFmpeg：7.0.2-static / Linux x86_64
+          - FFmpeg SHA256：e7e7fb30477f717e6f55f9180a70386c62677ef8a4d4d1a5d948f4098aa3eb99
+
+          构建脚本会解开 app.tgz 再次校验 FFmpeg；缺少或哈希不对会直接构建失败。
+          EOF
+          gh release create "$RELEASE_TAG" dist/*.fpk dist/SHA256SUMS.txt --title "MeTube ${UPSTREAM_TAG} fnOS x86 (${PACK_REV})" --notes-file /tmp/release-notes.md --prerelease
