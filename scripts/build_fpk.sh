@@ -2,19 +2,18 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TAG="${1:?用法: scripts/build_fpk.sh 2026.08.04}"
-PACK_REV="$(tr -d '[:space:]' < "$ROOT/PACK_REV")"
 VERSION="${TAG#v}"
 BUILD="$ROOT/.build"; PKG="$BUILD/package"; DIST="$ROOT/dist"
 FFMPEG_PYTHON="${FFMPEG_PYTHON:-python3}"
 rm -rf "$BUILD"; mkdir -p "$PKG" "$DIST"; cp -a "$ROOT/package-template/." "$PKG/"
-python3 - "$PKG" "$VERSION" "$PACK_REV" <<'PY2'
+python3 - "$PKG" "$VERSION" <<'PY2'
 from pathlib import Path
 import re,sys
-pkg=Path(sys.argv[1]); version=sys.argv[2]; pack_rev=sys.argv[3]
+pkg=Path(sys.argv[1]); version=sys.argv[2]
 p=pkg/'manifest'; s=p.read_text(encoding='utf-8')
-s=re.sub(r'^version=.*$',f'version={version}-{pack_rev}',s,flags=re.M)
+s=re.sub(r'^version=.*$',f'version={version}',s,flags=re.M)
 s=re.sub(r'^desc=.*$',f'desc=MeTube {version} x86 原生飞牛版。无需 Docker；FPK 内置静态 FFmpeg，自备 Python 3.13、官方 Node.js 22、yt-dlp、Deno 并构建 WebUI。',s,flags=re.M)
-s=re.sub(r'^changelog=.*$',f'changelog={pack_rev}：跟随 MeTube 上游 {version}；支持 fnOS 授权目录作为下载根目录（优先第一个可写授权目录，无授权时回退 metube/downloads）；GitHub Actions 构建阶段将经过 SHA256 校验的 FFmpeg 7.0.2-static 直接打入 FPK。',s,flags=re.M)
+s=re.sub(r'^changelog=.*$',f'changelog=跟随 MeTube 上游 {version}；支持 fnOS 授权目录作为下载根目录（优先第一个可写授权目录，无授权时回退 metube/downloads）；GitHub Actions 构建阶段将经过 SHA256 校验的 FFmpeg 7.0.2-static 直接打入 FPK。',s,flags=re.M)
 s=re.sub(r'^checksum=.*$','checksum=PLACEHOLDER',s,flags=re.M); p.write_text(s,encoding='utf-8')
 for rel in ('cmd/install_callback','cmd/upgrade_callback'):
     p=pkg/rel; s=p.read_text(encoding='utf-8'); s=re.sub(r'--version\s+"[^"]+"',f'--version "{version}"',s); p.write_text(s,encoding='utf-8')
@@ -29,7 +28,7 @@ from pathlib import Path
 import re,sys
 p=Path(sys.argv[1]); s=p.read_text(encoding='utf-8'); s=re.sub(r'^checksum=.*$',f'checksum={sys.argv[2]}',s,flags=re.M); p.write_text(s,encoding='utf-8')
 PY2
-OUT="$DIST/MeTube_${VERSION}_${PACK_REV}_fnOS_x86.fpk"
+OUT="$DIST/MeTube_${VERSION}_fnOS_x86.fpk"
 (cd "$PKG" && tar -czf "$OUT" manifest ICON.PNG ICON_256.PNG LICENSE app.tgz config cmd wizard)
 VERIFY="$BUILD/verify"; rm -rf "$VERIFY"; mkdir -p "$VERIFY"; tar -xzf "$OUT" -C "$VERIFY"
 python3 - "$VERIFY" <<'PY2'
