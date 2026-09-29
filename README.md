@@ -28,6 +28,8 @@ MeTube 的 `DOWNLOAD_DIR` 和 `AUDIO_DOWNLOAD_DIR` 都指向这个目录；临�
 
 每天北京时间大约 10:47 检查一次，也可以在 Actions 中手动 Run workflow。
 
-## 飞牛封装版本
+## 上游版本与旧包迁移
 
-`PACK_REV` 当前为 `native2`。
+新 FPK 的 manifest、文件名和 Release tag 直接使用上游版本 `2026.09.27`，不再添加封装修订号。同一个上游版本只发布一次，不能静默替换同版本 FPK。
+
+FnDepot 先前索引的版本为 `2026.09.27-native2`。已安装的旧包可能因版本号比较或安装来源无法自动升级；切换版本规则需要在设备上单独验证和迁移。
